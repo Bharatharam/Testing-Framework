@@ -1,0 +1,87 @@
+# Azure Pipelines for Automation Base Framework
+# Triggers on main branch, runs Maven tests on Windows with JDK 21,
+# publishes TestNG/JUnit results and Allure artifacts.
+
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  mavenOpts: '-Denv=qa -B'
+
+steps:
+  - checkout: self
+    fetchDepth: 0
+
+  - task: JavaToolInstaller@0
+    displayName: 'Use Java 21 (Zulu)'
+    inputs:
+      versionSpec: '21'
+      jdkArchitectureOption: 'x64'
+      jdkSourceOption: 'PreInstalled'
+
+  - task: Cache@2
+    displayName: 'Cache Maven local repository'
+    inputs:
+      key: 'maven | "$(Agent.OS)" | **/pom.xml'
+      restoreKeys: |
+        maven | "$(Agent.OS)"
+      path: '$(MAVEN_CACHE_FOLDER)'
+    condition: succeededOrFailed()
+
+  - powershell: |
+      Write-Host 'Ensuring HEADLESS=true in qa.properties for CI'
+      $path = 'src/test/resources/qa.properties'
+      if (Test-Path $path) {
+        $content = Get-Content $path
+        $updated = $false
+        $new = $content | ForEach-Object {
+          if ($_ -match '^HEADLESS=') { $updated = $true; 'HEADLESS=true' } else { $_ }
+        }
+        if (-not $updated) { $new += 'HEADLESS=true' }
+        $new | Set-Content -NoNewline -Path $path
+      }
+    displayName: 'Force headless mode for CI'
+
+  - script: |
+      mvn $(mavenOpts) clean test
+    displayName: 'Build and test (Maven)'
+
+  - task: PublishTestResults@2
+    displayName: 'Publish TestNG/JUnit results'
+    inputs:
+      testResultsFormat: 'JUnit'
+      testResultsFiles: 'target/surefire-reports/TEST-*.xml'
+      failTaskOnFailedTests: true
+      testRunTitle: 'Astrella Tests (main)'
+    condition: succeededOrFailed()
+
+  - script: |
+      mvn $(mavenOpts) allure:report
+    displayName: 'Generate Allure report'
+    condition: succeededOrFailed()
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Allure report artifact'
+    inputs:
+      pathToPublish: 'target/site/allure-maven-plugin'
+      artifactName: 'allure-report'
+    condition: succeededOrFailed()
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Allure results artifact'
+    inputs:
+      pathToPublish: 'target/allure-results'
+      artifactName: 'allure-results'
+    condition: succeededOrFailed()
+
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish surefire reports'
+    inputs:
+      pathToPublish: 'target/surefire-reports'
+      artifactName: 'surefire-reports'
+    condition: succeededOrFailed()
